@@ -43,6 +43,8 @@ import (
 	controller "github.com/padok-team/burrito/internal/controllers/terraformpullrequest"
 	datastore "github.com/padok-team/burrito/internal/datastore/client"
 	"github.com/padok-team/burrito/internal/repository/credentials"
+	mockrepo "github.com/padok-team/burrito/internal/repository/providers/mock"
+	repositorytypes "github.com/padok-team/burrito/internal/repository/types"
 	utils "github.com/padok-team/burrito/internal/testing"
 	//+kubebuilder:scaffold:imports
 )
@@ -514,6 +516,53 @@ var _ = Describe("TerraformPullRequest controller", func() {
 				It("should not have a LastDiscoveredCommit annotation", func() {
 					Expect(pr.Status.LastDiscoveredCommit).To(Equal(""))
 				})
+			})
+		})
+		Describe("Repository polling", Ordered, func() {
+			var pollingReconciler *controller.Reconciler
+
+			BeforeAll(func() {
+				copy := *reconciler
+				copy.APIProviderFactory = func(repository *configv1alpha1.TerraformRepository) (repositorytypes.APIProvider, error) {
+					return &mockrepo.APIProvider{}, nil
+				}
+				pollingReconciler = &copy
+
+				repository := &configv1alpha1.TerraformRepository{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "burrito-sync",
+						Namespace: "default",
+					},
+					Spec: configv1alpha1.TerraformRepositorySpec{
+						Repository: configv1alpha1.TerraformRepositoryRepository{
+							Url: "https://github.com/padok-team/burrito-sync.git",
+						},
+					},
+				}
+				Expect(k8sClient.Create(context.Background(), repository)).To(Succeed())
+
+				result, reconcileError = pollingReconciler.Reconcile(context.Background(), reconcile.Request{
+					NamespacedName: types.NamespacedName{Name: "burrito-sync", Namespace: "default"},
+				})
+			})
+
+			It("should reconcile the repository request without error", func() {
+				Expect(err).NotTo(HaveOccurred())
+				Expect(reconcileError).NotTo(HaveOccurred())
+				Expect(result.RequeueAfter).To(Equal(reconciler.Config.Controller.Timers.RepositorySync))
+			})
+
+			It("should create the remote pull request object", func() {
+				pr := &configv1alpha1.TerraformPullRequest{}
+				err := k8sClient.Get(context.Background(), types.NamespacedName{
+					Name:      "burrito-sync-9001",
+					Namespace: "default",
+				}, pr)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(pr.Spec.ID).To(Equal("9001"))
+				Expect(pr.Spec.Branch).To(Equal("feature-sync"))
+				Expect(pr.Spec.Base).To(Equal("main"))
+				Expect(pr.Annotations[annotations.LastBranchCommit]).To(Equal("mock-remote-commit"))
 			})
 		})
 	})

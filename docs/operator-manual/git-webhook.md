@@ -6,7 +6,7 @@ Otherwise, Burrito will poll repositories for changes, which may not be as effic
 
 !!! warning "Burrito polling limitations"
     Burrito's automatic polling of repositories only works for changes on referenced branches in TerraformLayers.
-    **Automatic polling of Pull Requests is not implemented yet.**
+    Burrito also polls open Pull Requests and Merge Requests to keep `TerraformPullRequest` resources in sync.
 
 ## Expose Burrito server to the internet
 

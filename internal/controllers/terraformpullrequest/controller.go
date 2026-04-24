@@ -7,6 +7,7 @@ import (
 	"github.com/padok-team/burrito/internal/burrito/config"
 	datastore "github.com/padok-team/burrito/internal/datastore/client"
 	"github.com/padok-team/burrito/internal/repository/credentials"
+	repositorytypes "github.com/padok-team/burrito/internal/repository/types"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -16,7 +17,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	log "github.com/sirupsen/logrus"
 
@@ -26,11 +29,12 @@ import (
 // Reconciler reconciles a TerraformPullRequest object
 type Reconciler struct {
 	client.Client
-	Scheme      *runtime.Scheme
-	Config      *config.Config
-	Credentials *credentials.CredentialStore
-	Recorder    record.EventRecorder
-	Datastore   datastore.Client
+	Scheme             *runtime.Scheme
+	Config             *config.Config
+	Credentials        *credentials.CredentialStore
+	APIProviderFactory func(repository *configv1alpha1.TerraformRepository) (repositorytypes.APIProvider, error)
+	Recorder           record.EventRecorder
+	Datastore          datastore.Client
 }
 
 //+kubebuilder:rbac:groups=config.terraform.padok.cloud,resources=terraformpullrequests,verbs=get;list;watch;create;update;patch;delete
@@ -45,6 +49,16 @@ type Reconciler struct {
 func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := log.WithContext(ctx)
 	log.Infof("starting reconciliation for pull request %s/%s ...", req.Namespace, req.Name)
+	repository := &configv1alpha1.TerraformRepository{}
+	repositoryErr := r.Client.Get(ctx, req.NamespacedName, repository)
+	if repositoryErr == nil {
+		return r.syncFromRepository(ctx, repository)
+	}
+	if !errors.IsNotFound(repositoryErr) {
+		log.Errorf("failed to get TerraformRepository: %s", repositoryErr)
+		return ctrl.Result{}, repositoryErr
+	}
+
 	pr := &configv1alpha1.TerraformPullRequest{}
 	err := r.Client.Get(ctx, req.NamespacedName, pr)
 	if errors.IsNotFound(err) {
@@ -55,7 +69,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		log.Errorf("failed to get TerraformPullRequest: %s", err)
 		return ctrl.Result{}, err
 	}
-	repository := &configv1alpha1.TerraformRepository{}
+	repository = &configv1alpha1.TerraformRepository{}
 	err = r.Client.Get(ctx, types.NamespacedName{
 		Name:      pr.Spec.Repository.Name,
 		Namespace: pr.Spec.Repository.Namespace,
@@ -85,6 +99,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&configv1alpha1.TerraformPullRequest{}).
+		Watches(&configv1alpha1.TerraformRepository{}, handler.EnqueueRequestsFromMapFunc(
+			func(ctx context.Context, obj client.Object) []reconcile.Request {
+				repository := obj.(*configv1alpha1.TerraformRepository)
+				return []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: repository.Namespace, Name: repository.Name}}}
+			},
+		)).
 		WithOptions(controller.Options{MaxConcurrentReconciles: r.Config.Controller.MaxConcurrentReconciles}).
 		WithEventFilter(ignorePredicate()).
 		Complete(r)
@@ -93,6 +113,12 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 func ignorePredicate() predicate.Predicate {
 	return predicate.Funcs{
 		UpdateFunc: func(e event.UpdateEvent) bool {
+			if _, ok := e.ObjectOld.(*configv1alpha1.TerraformRepository); ok {
+				return true
+			}
+			if _, ok := e.ObjectNew.(*configv1alpha1.TerraformRepository); ok {
+				return true
+			}
 			// Update only if generation or annotations change, filter out anything else.
 			// We only need to check generation or annotations change here, because it is only
 			// updated on spec changes. On the other hand RevisionVersion

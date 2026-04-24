@@ -43,3 +43,4 @@ venv/
 
 test-repo/
 TIltfile
+deploy/charts/burrito/templates/dev/

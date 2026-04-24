@@ -1,6 +1,7 @@
 package gitlab
 
 import (
+	"fmt"
 	"strconv"
 
 	configv1alpha1 "github.com/padok-team/burrito/api/v1alpha1"
@@ -8,6 +9,7 @@ import (
 	"github.com/padok-team/burrito/internal/controllers/terraformpullrequest/comment"
 	log "github.com/sirupsen/logrus"
 	gitlab "gitlab.com/gitlab-org/api/client-go/v2"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 type APIProvider struct {
@@ -62,4 +64,51 @@ func (api *APIProvider) Comment(repository *configv1alpha1.TerraformRepository, 
 		return err
 	}
 	return nil
+}
+
+func (api *APIProvider) ListPullRequests(repository *configv1alpha1.TerraformRepository) ([]configv1alpha1.TerraformPullRequest, error) {
+	state := "opened"
+	listOpts := &gitlab.ListProjectMergeRequestsOptions{
+		State: &state,
+		ListOptions: gitlab.ListOptions{
+			PerPage: 100,
+		},
+	}
+
+	var pullRequests []configv1alpha1.TerraformPullRequest
+	for {
+		mergeRequests, resp, err := api.client.MergeRequests.ListProjectMergeRequests(getGitlabNamespacedName(repository.Spec.Repository.Url), listOpts)
+		if err != nil {
+			return nil, err
+		}
+		for _, mergeRequest := range mergeRequests {
+			if mergeRequest == nil {
+				continue
+			}
+			pullRequests = append(pullRequests, configv1alpha1.TerraformPullRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      fmt.Sprintf("%s-%d", repository.Name, mergeRequest.IID),
+					Namespace: repository.Namespace,
+					Annotations: map[string]string{
+						annotations.LastBranchCommit: mergeRequest.SHA,
+					},
+				},
+				Spec: configv1alpha1.TerraformPullRequestSpec{
+					Branch: mergeRequest.SourceBranch,
+					Base:   mergeRequest.TargetBranch,
+					ID:     strconv.FormatInt(mergeRequest.IID, 10),
+					Repository: configv1alpha1.TerraformLayerRepository{
+						Name:      repository.Name,
+						Namespace: repository.Namespace,
+					},
+				},
+			})
+		}
+		if resp.NextPage == 0 {
+			break
+		}
+		listOpts.Page = resp.NextPage
+	}
+
+	return pullRequests, nil
 }
